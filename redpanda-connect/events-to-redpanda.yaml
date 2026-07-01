@@ -1,0 +1,20 @@
+input:
+  http_server:
+    address: 0.0.0.0:8000
+    path: /events
+
+pipeline:
+  processors:
+    - mapping: |
+        root.event_id = this.event_id.or(uuid_v4())
+        root.application_id = this.application_id
+        root.file_name = this.file_name
+        root.event_type = this.event_type
+        root.received_at = now()
+        root.source = "document-api"
+
+output:
+  redpanda:
+    seed_brokers:
+      - localhost:19092
+    topic: document-events

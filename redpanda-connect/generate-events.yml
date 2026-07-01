@@ -1,0 +1,22 @@
+input:
+  generate:
+    interval: 500ms
+    mapping: |
+      let event_types = [
+        "user_registered",
+        "user_logged_in",
+        "order_created",
+        "payment_completed"
+      ]
+
+      root.event_id = uuid_v4()
+      root.event_type = $event_types.index(random_int(min: 0, max: 3))
+      root.application_id = "app-" + random_int(min: 1, max: 50).string()
+      root.created_at = now()
+      root.source = "traffic-generator"
+
+output:
+  redpanda:
+    seed_brokers:
+      - localhost:19092
+    topic: application-events
