@@ -1,0 +1,62 @@
+# Use case 5: topic-to-topic transformation + routing
+# Consumes events.raw, redacts PII, drops noise, routes by event type.
+
+input:
+  kafka_franz:
+    seed_brokers: ["localhost:19092"]   # inside compose network: redpanda:9092
+    topics: ["events.raw"]
+    consumer_group: "event-router"
+
+pipeline:
+  processors:
+    # 1) Parse + filter: drop heartbeats and malformed messages
+    - mapping: |
+        root = this
+        # deleted() drops the message entirely
+        root = if this.event_type == "heartbeat" { deleted() }
+    - catch:
+        # anything that failed JSON parsing upstream gets tagged, not crashed on
+        - mapping: |
+            root = {}
+            root.error = "malformed"
+            root.raw = content().string()
+
+    # 2) Redact PII fields wherever they appear
+    - mapping: |
+        root = this
+        root.user.email = this.user.email.or("").re_replace_all("(?i)^(.).*(@.*)$", "$1***$2")
+        root.user.phone = if this.exists("user.phone") { "REDACTED" }
+        root.user.ip = deleted()
+
+    # 3) Enrich with routing metadata
+    - mapping: |
+        root = this
+        meta route = this.event_type.or("unknown")
+        root.processed_at = now()
+
+output:
+  switch:
+    cases:
+      - check: metadata("route") == "order_created" || metadata("route") == "order_updated"
+        output:
+          kafka_franz:
+            seed_brokers: ["localhost:19092"]
+            topic: "events.orders"
+
+      - check: metadata("route") == "user_signup"
+        output:
+          kafka_franz:
+            seed_brokers: ["localhost:19092"]
+            topic: "events.users"
+
+      - check: this.error == "malformed"
+        output:
+          kafka_franz:
+            seed_brokers: ["localhost:19092"]
+            topic: "events.dlq"
+
+      # default: everything else
+      - output:
+          kafka_franz:
+            seed_brokers: ["localhost:19092"]
+            topic: "events.other"

@@ -1,0 +1,7 @@
+{
+  "events.orders": 383,
+  "events.users": 219,
+  "events.other": 238,
+  "events.dlq": 56,
+  "dropped_heartbeat": 104
+}
