@@ -1,0 +1,16 @@
+{
+  "$id": "https://redpanda-workshop.local/schemas/notification.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Notification",
+  "description": "A simple Notification Event message",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": ["integer", "null"]
+    },
+    "message": {
+      "type": ["string", "null"]
+    }
+  },
+  "additionalProperties": false
+}
