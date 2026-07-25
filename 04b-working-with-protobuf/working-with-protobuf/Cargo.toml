@@ -1,0 +1,15 @@
+[package]
+name = "working-with-protobuf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rdkafka = { version = "0.39", features = ["dynamic-linking"] }
+tokio = { version = "1", features = ["full"] }
+dotenvy = "0.15"
+anyhow = "1"
+prost = "0.14"
+prost-types = "0.14.4"
+prost-build = "0.14.4"
+[build-dependencies]
+prost-build = "0.14.4"

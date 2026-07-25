@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package com.trivadis.kafkaws.protobuf.v1;
+
+// A simple Notification Event message
+message Notification {
+  optional int64 id = 1;
+  optional string message = 2;
+}
