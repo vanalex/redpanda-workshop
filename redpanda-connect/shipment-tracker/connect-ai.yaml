@@ -1,0 +1,90 @@
+# ---------------------------------------------------------------------------
+# Redpanda Connect - Shipment Tracker (AI bonus)
+#
+# Same pipeline as connect.yaml, but on a real status change it asks an LLM to
+# write a short, friendly tracking update, then stamps it onto the record as
+# `message` before writing to the topic.
+#
+# Requires an OpenAI API key, injected from the environment (never hardcode it):
+#   export OPENAI_API_KEY=sk-...
+#   docker exec -e OPENAI_API_KEY=$OPENAI_API_KEY -ti redpanda-1 \
+#     rpk connect run /etc/redpanda/connect.yaml
+# ---------------------------------------------------------------------------
+
+input:
+  sql_select:
+    driver: postgres
+    dsn: postgres://root:secret@postgres:5432/root?sslmode=disable
+    table: shipments
+    columns: [ '*' ]
+
+pipeline:
+  processors:
+    - bloblang: |
+        root = {}
+        root.shipment_id     = this.shipment_id
+        root.customer_id     = this.customer_id
+        root.carrier         = this.carrier
+        root.tracking_number = this.tracking_number
+        root.origin          = this.origin
+        root.destination     = this.destination
+        root.package_details = this.package_details
+        root.shipment_status = this.shipment_status
+
+    - branch:
+        processors:
+          - try:
+              - cache:
+                  resource: shipment_cache
+                  operator: get
+                  key: '${! json("shipment_id") }'
+          - catch:
+              - mapping: 'root = "none"'
+        result_map: 'root.previous_status = content().string()'
+
+    - cache:
+        resource: shipment_cache
+        operator: set
+        key: '${! json("shipment_id") }'
+        value: '${! json("shipment_status") }'
+
+    # Personalize: only on a genuine transition (and not the very first sighting).
+    - label: openai
+      branch:
+        request_map: 'root = if this.previous_status != this.shipment_status && this.previous_status != "none" { this } else { deleted() }'
+        processors:
+          - try:
+              - openai_chat_completion:
+                  server_address: https://api.openai.com/v1
+                  api_key: "${OPENAI_API_KEY}"
+                  model: gpt-4o
+                  system_prompt: |
+                    You are a friendly delivery assistant. A customer's shipment just
+                    changed status from "${! json("previous_status") }" to
+                    "${! json("shipment_status") }". Write one short, warm sentence
+                    letting them know. Bonus points for a light nod to what's inside:
+                    ${! json("package_details") }.
+          - catch:
+              - mapping: 'root = "Your shipment is now: " + this.shipment_status'
+        result_map: 'root.message = content().string()'
+
+    # Emit the notification (here we just log; swap for an http POST in prod).
+    - branch:
+        request_map: 'root = if this.message != null { this } else { deleted() }'
+        processors:
+          - log:
+              level: INFO
+              message: |
+                Notify customer ${! json("customer_id") }: ${! json("message") }
+
+cache_resources:
+  - label: shipment_cache
+    memory:
+      default_ttl: 1800s
+
+output:
+  label: redpanda
+  kafka:
+    addresses: [ 'redpanda-1:9092' ]
+    topic: shipments
+    key: '${! json("shipment_id") }'

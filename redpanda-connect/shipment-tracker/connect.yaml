@@ -1,0 +1,136 @@
+# ---------------------------------------------------------------------------
+# Redpanda Connect - Shipment Tracker
+#
+# Postgres (shipments table)
+#   -> scrub PII                          (stateless)
+#   -> look up previous status via cache  (stateful)
+#   -> persist current status to cache
+#   -> notify only when status changed    (suppress duplicates)
+#   -> Redpanda topic `shipments`
+# ---------------------------------------------------------------------------
+
+input:
+  sql_select:
+    driver: postgres
+    dsn: postgres://root:secret@postgres:5432/root?sslmode=disable
+    table: shipments
+    columns: [ '*' ]
+
+pipeline:
+  processors:
+    # 1. Stateless: drop sensitive customer fields before anything downstream sees them.
+    - bloblang: |
+        root = {}
+        root.shipment_id     = this.shipment_id
+        root.customer_id     = this.customer_id
+        root.carrier         = this.carrier
+        root.tracking_number = this.tracking_number
+        root.origin          = this.origin
+        root.destination     = this.destination
+        root.package_details = this.package_details
+        root.shipment_status = this.shipment_status
+
+    # 2. Stateful: look up the previously-seen status for this shipment.
+    #    Cache misses are logged as errors, so wrap the get in try/catch.
+    - branch:
+        processors:
+          - try:
+              - cache:
+                  resource: shipment_cache
+                  operator: get
+                  key: '${! json("shipment_id") }'
+          - catch:
+              - mapping: 'root = "none"'
+        result_map: 'root.previous_status = content().string()'
+
+    # 3. Persist the current status so the next event can compare against it.
+    #    (Swap `memory` for redis/dynamodb in production for durability.)
+    - cache:
+        resource: shipment_cache
+        operator: set
+        key: '${! json("shipment_id") }'
+        value: '${! json("shipment_status") }'
+
+    # 4. Notify only when the status actually changed.
+    #    request_map returns deleted() on no-change, which skips this branch
+    #    while letting the original message flow through unchanged.
+    - branch:
+        request_map: 'root = if this.previous_status != this.shipment_status { this } else { deleted() }'
+        processors:
+          - log:
+              level: INFO
+              message: >-
+                Shipment ${! json("shipment_id") } for customer ${! json("customer_id") }
+                moved ${! json("previous_status") } -> ${! json("shipment_status") }
+
+cache_resources:
+  - label: shipment_cache
+    memory:
+      default_ttl: 1800s
+
+output:
+  label: redpanda
+  kafka:
+    addresses: [ 'redpanda-1:9092' ]
+    topic: shipments
+    key: '${! json("shipment_id") }'
+
+# ---------------------------------------------------------------------------
+# Unit tests: prove PII is scrubbed and transitions are tracked across a
+# sequence of events for the same shipment_id.
+# Run with:  rpk connect test /etc/redpanda/connect.yaml
+# ---------------------------------------------------------------------------
+tests:
+  - name: scrubs pii and tracks status transitions
+    environment: {}
+    input_batch:
+      - content: |
+          {
+            "shipment_id": 42, "customer_id": 7,
+            "customer_name": "Jane Smith", "customer_email": "jane@example.com",
+            "customer_address": "456 Oak Ave", "carrier": "UPS",
+            "tracking_number": "1Z999AA10123456784", "origin": "Chicago, IL",
+            "destination": "Austin, TX", "package_details": "1x espresso machine",
+            "shipment_status": "picked_up"
+          }
+      - content: |
+          {
+            "shipment_id": 42, "customer_id": 7,
+            "customer_name": "Jane Smith", "customer_email": "jane@example.com",
+            "customer_address": "456 Oak Ave", "carrier": "UPS",
+            "tracking_number": "1Z999AA10123456784", "origin": "Chicago, IL",
+            "destination": "Austin, TX", "package_details": "1x espresso machine",
+            "shipment_status": "picked_up"
+          }
+      - content: |
+          {
+            "shipment_id": 42, "customer_id": 7,
+            "customer_name": "Jane Smith", "customer_email": "jane@example.com",
+            "customer_address": "456 Oak Ave", "carrier": "UPS",
+            "tracking_number": "1Z999AA10123456784", "origin": "Chicago, IL",
+            "destination": "Austin, TX", "package_details": "1x espresso machine",
+            "shipment_status": "in_transit"
+          }
+    output_batches:
+      -
+        - json_equals: |
+            {
+              "shipment_id": 42, "customer_id": 7, "carrier": "UPS",
+              "tracking_number": "1Z999AA10123456784", "origin": "Chicago, IL",
+              "destination": "Austin, TX", "package_details": "1x espresso machine",
+              "shipment_status": "picked_up", "previous_status": "none"
+            }
+        - json_equals: |
+            {
+              "shipment_id": 42, "customer_id": 7, "carrier": "UPS",
+              "tracking_number": "1Z999AA10123456784", "origin": "Chicago, IL",
+              "destination": "Austin, TX", "package_details": "1x espresso machine",
+              "shipment_status": "picked_up", "previous_status": "picked_up"
+            }
+        - json_equals: |
+            {
+              "shipment_id": 42, "customer_id": 7, "carrier": "UPS",
+              "tracking_number": "1Z999AA10123456784", "origin": "Chicago, IL",
+              "destination": "Austin, TX", "package_details": "1x espresso machine",
+              "shipment_status": "in_transit", "previous_status": "picked_up"
+            }

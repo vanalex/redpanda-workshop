@@ -1,0 +1,57 @@
+name: rpu-shipments
+
+services:
+  redpanda-1:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    container_name: redpanda-1
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda-1:9092
+      - --pandaproxy-addr=0.0.0.0:8082
+      - --advertise-pandaproxy-addr=redpanda-1:8082
+      - --schema-registry-addr=0.0.0.0:8081
+    volumes:
+      # Mount the pipeline so `rpk connect run /etc/redpanda/connect.yaml` works.
+      - ./connect.yaml:/etc/redpanda/connect.yaml
+      - ./connect-ai.yaml:/etc/redpanda/connect-ai.yaml
+    ports:
+      - "9092:9092"
+      - "8081:8081"
+      - "8082:8082"
+      - "9644:9644"
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    container_name: redpanda-console
+    entrypoint: /bin/sh
+    command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml; /app/console'
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda-1:9092"]
+          schemaRegistry:
+            enabled: true
+            urls: ["http://redpanda-1:8081"]
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redpanda-1
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: root
+    volumes:
+      - ./files/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
