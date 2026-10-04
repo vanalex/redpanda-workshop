@@ -1,0 +1,148 @@
+version: "3.8"
+
+# Local streaming lakehouse: Redpanda -> Redpanda Connect -> Apache Iceberg (MinIO + REST catalog)
+# Query the results with the bundled Spark container.
+#
+# NOTE: credentials below (admin/password) are for LOCAL DEV ONLY. Never reuse these in real environments.
+
+services:
+
+  # ---------- Streaming layer ----------
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+      - --pandaproxy-addr=PLAINTEXT://0.0.0.0:8082
+      - --advertise-pandaproxy-addr=PLAINTEXT://redpanda:8082
+    ports:
+      - "9092:9092"
+      - "8082:8082"
+      - "9644:9644"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    networks:
+      - lakehouse_net
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:latest
+    container_name: redpanda-console
+    depends_on:
+      - redpanda
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+    ports:
+      - "8085:8080"
+    networks:
+      - lakehouse_net
+
+  # ---------- Pipeline layer ----------
+
+  redpanda-connect:
+    image: docker.redpanda.com/redpandadata/connect:latest
+    container_name: redpanda-connect
+    depends_on:
+      - redpanda
+      - rest
+      - minio
+    environment:
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+    volumes:
+      - ./connect.yaml:/connect.yaml:ro
+    command: ["run", "/connect.yaml"]
+    networks:
+      - lakehouse_net
+
+  # ---------- Lakehouse layer (Iceberg REST catalog + MinIO storage) ----------
+
+  rest:
+    image: tabulario/iceberg-rest
+    container_name: iceberg-rest
+    ports:
+      - "8181:8181"
+    environment:
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+      - CATALOG_WAREHOUSE=s3://warehouse/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+    networks:
+      - lakehouse_net
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    command: ["server", "/data", "--console-address", ":9001"]
+    volumes:
+      - minio-data:/data
+    networks:
+      lakehouse_net:
+        aliases:
+          - warehouse.minio
+
+  mc:
+    image: minio/mc
+    container_name: minio-mc
+    depends_on:
+      - minio
+    environment:
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+    entrypoint: >
+      /bin/sh -c "
+      until (mc alias set minio http://minio:9000 admin password) do echo '...waiting for minio...' && sleep 1; done;
+      mc mb --ignore-existing minio/warehouse;
+      mc anonymous set public minio/warehouse;
+      tail -f /dev/null
+      "
+    networks:
+      - lakehouse_net
+
+  # ---------- Query layer ----------
+
+  spark-iceberg:
+    image: tabulario/spark-iceberg
+    container_name: spark-iceberg
+    depends_on:
+      - rest
+      - minio
+    environment:
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+    ports:
+      - "8888:8888"
+      - "8080:8080"
+      - "10000:10000"
+      - "10001:10001"
+    volumes:
+      - ./warehouse:/home/iceberg/warehouse
+      - ./notebooks:/home/iceberg/notebooks/notebooks
+    networks:
+      - lakehouse_net
+
+networks:
+  lakehouse_net:
+
+volumes:
+  redpanda-data:
+  minio-data:
