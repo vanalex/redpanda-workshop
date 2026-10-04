@@ -1,0 +1,43 @@
+# Redpanda Connect pipeline
+# Consumes JSON messages from the "orders" topic and lands them in the
+# Iceberg table streaming.orders (catalog name "demo" in Spark), backed by
+# MinIO as S3-compatible storage.
+
+input:
+  redpanda:
+    seed_brokers: ["redpanda:9092"]
+    topics: ["orders"]
+    consumer_group: "iceberg_sink"
+
+pipeline:
+  processors:
+    - mapping: |
+        root = this
+        root.ingested_at = now()
+        root.source_topic = meta("kafka_topic")
+
+output:
+  iceberg:
+    catalog:
+      url: "http://rest:8181"
+      warehouse: "warehouse"
+    namespace: "streaming"
+    table: "orders"
+    storage:
+      aws_s3:
+        bucket: "warehouse"
+        endpoint: "http://minio:9000"
+        force_path_style_urls: true
+        region: "us-east-1"
+        credentials:
+          id: "${AWS_ACCESS_KEY_ID}"
+          secret: "${AWS_SECRET_ACCESS_KEY}"
+    schema_evolution:
+      enabled: true
+      table_location: "s3://warehouse/streaming/orders/"
+    batching:
+      count: 10
+      period: 5s
+
+logger:
+  level: INFO

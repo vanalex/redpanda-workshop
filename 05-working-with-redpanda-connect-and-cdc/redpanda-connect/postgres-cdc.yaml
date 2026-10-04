@@ -1,0 +1,21 @@
+input:
+  postgres_cdc:
+    dsn: postgres://postgres:postgres@postgres:5432/shop?sslmode=disable
+
+    schema: public
+
+    tables:
+      - orders
+
+    slot_name: workshop_cdc
+
+    stream_snapshot: true
+
+output:
+  redpanda:
+    seed_brokers:
+      - redpanda:9092
+
+    topic: postgres.orders
+
+    key: '${! json("id") }'
